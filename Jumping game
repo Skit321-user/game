@@ -1,0 +1,307 @@
+import pygame
+import random
+import os
+
+# Configuration
+SCREEN_WIDTH = 500
+SCREEN_HEIGHT = 700
+COLUMN_WIDTH = 50
+PLAYER_SIZE = 30
+GRAVITY = 0.6
+JUMP_STRENGTH = -15
+PLATFORM_INTERVAL = 160
+PLATFORM_HEIGHT = 20
+DOUBLE_JUMP_COOLDOWN = 7.5 * 60  # 7.5 seconds at 60 FPS
+HS_FILE = "highscore.txt"
+
+# Colors
+SKY_BLUE = (135, 206, 235)
+COLUMN_COLOR = (60, 60, 60)
+PLATFORM_NEW = (34, 139, 34)
+PLATFORM_USED = (100, 100, 100)
+PLATFORM_VANISH = (255, 165, 0)
+PLAYER_COLOR = (255, 100, 100)
+SPIKE_COLOR = (200, 0, 0)
+FIRE_COLOR = (255, 69, 0)
+FIRE_GLOW = (255, 165, 0)
+SHIELD_COLOR = (0, 191, 255)
+RECHARGE_COLOR = (50, 255, 50)
+
+
+class Fireball:
+    def __init__(self):
+        self.radius = random.randint(8, 35)
+        self.x = random.randint(COLUMN_WIDTH + self.radius, SCREEN_WIDTH - COLUMN_WIDTH - self.radius)
+        self.y = -60
+        self.speed = 5.5 - (self.radius / 12) + random.uniform(-0.5, 0.5)
+
+    def move(self):
+        self.y += self.speed
+
+    def draw(self, surface):
+        pygame.draw.circle(surface, FIRE_GLOW, (int(self.x), int(self.y)), self.radius + 3)
+        pygame.draw.circle(surface, FIRE_COLOR, (int(self.x), int(self.y)), self.radius)
+        if self.radius > 20:
+            pygame.draw.circle(surface, (255, 255, 0), (int(self.x), int(self.y)), self.radius // 3)
+
+    def get_rect(self):
+        hitbox_padding = self.radius * 0.2
+        return pygame.Rect(self.x - self.radius + hitbox_padding,
+                           self.y - self.radius + hitbox_padding,
+                           (self.radius - hitbox_padding) * 2,
+                           (self.radius - hitbox_padding) * 2)
+
+
+class Platform:
+    def __init__(self, x, y, width, height, is_moving=False, has_spikes=False, is_vanishing=False):
+        self.rect = pygame.Rect(x, y, width, height)
+        self.has_been_touched = False
+        self.is_moving = is_moving
+        self.has_spikes = has_spikes
+        self.is_vanishing = is_vanishing
+        self.has_shield = random.random() < 0.1  # 10% chance to spawn a shield
+
+        self.move_speed = random.choice([-3, 3]) if is_moving else 0
+        self.vanish_duration = 60
+        self.respawn_duration = 180
+        self.timer = 0
+        self.is_active = True
+
+        if self.has_spikes:
+            self.spike_offset = random.randint(0, max(0, width - 30))
+        else:
+            self.spike_offset = 0
+
+    def update(self):
+        if self.is_moving:
+            self.rect.x += self.move_speed
+            if self.rect.left < COLUMN_WIDTH or self.rect.right > SCREEN_WIDTH - COLUMN_WIDTH:
+                self.move_speed *= -1
+
+        if self.is_vanishing:
+            if self.is_active and self.has_been_touched:
+                self.timer += 1
+                if self.timer >= self.vanish_duration:
+                    self.is_active = False
+                    self.timer = 0
+            elif not self.is_active:
+                self.timer += 1
+                if self.timer >= self.respawn_duration:
+                    self.is_active = True
+                    self.has_been_touched = False
+                    self.timer = 0
+
+
+class ParkourGame:
+    def __init__(self):
+        pygame.init()
+        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+        pygame.display.set_caption("Fireball Parkour: Shield Stacking & High Score")
+        self.clock = pygame.time.Clock()
+
+        self.player_rect = pygame.Rect(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 150, PLAYER_SIZE, PLAYER_SIZE)
+        self.vel_y = 0
+        self.score = 0
+        self.high_score = self.load_high_score()
+        self.running = True
+
+        self.shield_count = 0
+        self.can_double_jump = True
+        self.dj_cooldown_timer = 0
+        self.in_air = False
+
+        self.platforms = []
+        self.fireballs = []
+        self.next_platform_y = SCREEN_HEIGHT - 150
+        self.spawn_side = 0
+
+        start_floor = Platform(0, SCREEN_HEIGHT - 40, SCREEN_WIDTH, 40)
+        start_floor.has_been_touched = True
+        self.platforms.append(start_floor)
+        self.spawn_platforms()
+
+    def load_high_score(self):
+        if os.path.exists(HS_FILE):
+            try:
+                with open(HS_FILE, "r") as f:
+                    return int(f.read())
+            except:
+                return 0
+        return 0
+
+    def save_high_score(self):
+        with open(HS_FILE, "w") as f:
+            f.write(str(self.high_score))
+
+    def calculate_spawn_rate(self):
+        return min(0.008 + (self.score * 0.0005), 0.04)
+
+    def spawn_platforms(self):
+        while self.next_platform_y > -500:
+            width = random.randint(110, 170)
+            is_moving = random.random() < 0.3
+            has_spikes = random.random() < 0.2
+            is_vanishing = random.random() < 0.3
+
+            x = COLUMN_WIDTH if self.spawn_side == 0 else SCREEN_WIDTH - COLUMN_WIDTH - width
+            self.spawn_side = 1 - self.spawn_side
+
+            self.platforms.append(
+                Platform(x, self.next_platform_y, width, PLATFORM_HEIGHT, is_moving, has_spikes, is_vanishing))
+            self.next_platform_y -= PLATFORM_INTERVAL
+
+    def update(self):
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_a]: self.player_rect.x -= 7
+        if keys[pygame.K_d]: self.player_rect.x += 7
+
+        if self.player_rect.left < COLUMN_WIDTH: self.player_rect.left = COLUMN_WIDTH
+        if self.player_rect.right > SCREEN_WIDTH - COLUMN_WIDTH: self.player_rect.right = SCREEN_WIDTH - COLUMN_WIDTH
+
+        self.vel_y += GRAVITY
+        self.player_rect.y += self.vel_y
+
+        if not self.can_double_jump:
+            self.dj_cooldown_timer += 1
+            if self.dj_cooldown_timer >= DOUBLE_JUMP_COOLDOWN:
+                self.can_double_jump = True
+                self.dj_cooldown_timer = 0
+
+        if random.random() < self.calculate_spawn_rate():
+            self.fireballs.append(Fireball())
+
+        for f in self.fireballs[:]:
+            f.move()
+            if f.y > SCREEN_HEIGHT + 50:
+                self.fireballs.remove(f)
+            if self.player_rect.colliderect(f.get_rect()):
+                if self.shield_count > 0:
+                    self.shield_count -= 1
+                    self.fireballs.remove(f)
+                else:
+                    self.running = False
+
+        self.in_air = True
+        for plat in self.platforms:
+            plat.update()
+            if plat.is_active:
+                if plat.has_shield:
+                    shield_rect = pygame.Rect(plat.rect.centerx - 10, plat.rect.top - 25, 20, 20)
+                    if self.player_rect.colliderect(shield_rect):
+                        self.shield_count += 1
+                        plat.has_shield = False
+
+                if self.vel_y > 0 and self.player_rect.colliderect(plat.rect):
+                    if self.player_rect.bottom < plat.rect.bottom + 10:
+                        if plat.has_spikes:
+                            spike_x_center = plat.rect.x + plat.spike_offset + 15
+                            spike_area = pygame.Rect(spike_x_center - 15, plat.rect.top - 10, 30, 10)
+                            if self.player_rect.colliderect(spike_area):
+                                if self.shield_count > 0:
+                                    self.shield_count -= 1
+                                    plat.has_spikes = False
+                                else:
+                                    self.running = False
+
+                        self.player_rect.bottom = plat.rect.top
+                        self.vel_y = 0
+                        self.in_air = False
+                        if not plat.has_been_touched:
+                            plat.has_been_touched = True
+                            self.score += 1
+                            # Update High Score
+                            if self.score > self.high_score:
+                                self.high_score = self.score
+                                self.save_high_score()
+
+                        if plat.is_moving:
+                            self.player_rect.x += plat.move_speed
+
+        if self.player_rect.top < SCREEN_HEIGHT // 2:
+            scroll_amt = (SCREEN_HEIGHT // 2) - self.player_rect.top
+            self.player_rect.y += scroll_amt
+            for plat in self.platforms: plat.rect.y += scroll_amt
+            for f in self.fireballs: f.y += scroll_amt
+            self.next_platform_y += scroll_amt
+
+        self.platforms = [p for p in self.platforms if p.rect.y < SCREEN_HEIGHT + 150]
+        if self.next_platform_y > -200: self.spawn_platforms()
+
+    def draw(self):
+        self.screen.fill(SKY_BLUE)
+        pygame.draw.rect(self.screen, COLUMN_COLOR, (0, 0, COLUMN_WIDTH, SCREEN_HEIGHT))
+        pygame.draw.rect(self.screen, COLUMN_COLOR, (SCREEN_WIDTH - COLUMN_WIDTH, 0, COLUMN_WIDTH, SCREEN_HEIGHT))
+
+        for plat in self.platforms:
+            if not plat.is_active:
+                if plat.timer > (plat.respawn_duration - 40):
+                    pygame.draw.rect(self.screen, (200, 200, 200), plat.rect, 1)
+                continue
+
+            color = PLATFORM_VANISH if plat.is_vanishing else (PLATFORM_USED if plat.has_been_touched else PLATFORM_NEW)
+            if plat.is_vanishing and plat.has_been_touched and (
+                    plat.vanish_duration - plat.timer) < 20 and pygame.time.get_ticks() % 100 < 50:
+                color = SKY_BLUE
+
+            pygame.draw.rect(self.screen, color, plat.rect)
+
+            if plat.has_spikes:
+                base_x = plat.rect.x + plat.spike_offset
+                pts = [(base_x, plat.rect.top), (base_x + 30, plat.rect.top), (base_x + 15, plat.rect.top - 15)]
+                pygame.draw.polygon(self.screen, SPIKE_COLOR, pts)
+
+            if plat.has_shield:
+                pygame.draw.circle(self.screen, SHIELD_COLOR, (plat.rect.centerx, plat.rect.top - 15), 8)
+
+        for f in self.fireballs: f.draw(self.screen)
+
+        # Draw Player & Stacked Shield Auras
+        pygame.draw.rect(self.screen, PLAYER_COLOR, self.player_rect)
+        for i in range(self.shield_count):
+            if i < 5:
+                padding = 6 + (i * 5)
+                pygame.draw.rect(self.screen, SHIELD_COLOR, self.player_rect.inflate(padding, padding), 2)
+
+        # Double Jump Recharge Bar
+        if not self.can_double_jump:
+            progress = self.dj_cooldown_timer / DOUBLE_JUMP_COOLDOWN
+            bar_width = PLAYER_SIZE
+            pygame.draw.rect(self.screen, (100, 100, 100), (self.player_rect.x, self.player_rect.y - 10, bar_width, 4))
+            pygame.draw.rect(self.screen, RECHARGE_COLOR,
+                             (self.player_rect.x, self.player_rect.y - 10, bar_width * progress, 4))
+
+        # UI
+        font = pygame.font.SysFont("Arial", 22, bold=True)
+        # Score and Best
+        self.screen.blit(font.render(f"TILES: {self.score}", True, (255, 255, 255)), (COLUMN_WIDTH + 20, 20))
+        self.screen.blit(font.render(f"BEST: {self.high_score}", True, (255, 255, 0)), (COLUMN_WIDTH + 20, 45))
+
+        # Power-up status
+        dj_text = "JUMP READY" if self.can_double_jump else "RECHARGING..."
+        self.screen.blit(font.render(dj_text, True, RECHARGE_COLOR if self.can_double_jump else (200, 200, 200)),
+                         (COLUMN_WIDTH + 20, 75))
+
+        shield_text = f"SHIELDS: {self.shield_count}"
+        self.screen.blit(font.render(shield_text, True, SHIELD_COLOR), (COLUMN_WIDTH + 20, 100))
+
+        pygame.display.flip()
+
+    def run(self):
+        while self.running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT: self.running = False
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
+                    if not self.in_air:
+                        self.vel_y = JUMP_STRENGTH
+                    elif self.can_double_jump:
+                        self.vel_y = JUMP_STRENGTH
+                        self.can_double_jump = False
+            self.update()
+            if self.player_rect.top > SCREEN_HEIGHT: self.running = False
+            self.draw()
+            self.clock.tick(60)
+        pygame.quit()
+
+
+if __name__ == "__main__":
+    ParkourGame().run()
