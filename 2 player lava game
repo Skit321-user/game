@@ -1,0 +1,159 @@
+import pygame
+import random
+
+# --- Configuration ---
+SCREEN_WIDTH = 600
+SCREEN_HEIGHT = 800
+FPS = 60
+
+# Colors
+WHITE = (255, 255, 255)
+BLUE = (0, 210, 255)  # Player 1
+RED = (255, 75, 43)  # Player 2
+LAVA = (255, 69, 0)
+PLATFORM = (100, 255, 100)
+BG_COLOR = (30, 30, 30)
+
+
+class Player:
+    def __init__(self, x, y, color, controls):
+        self.rect = pygame.Rect(x, y, 30, 30)
+        self.color = color
+        self.controls = controls  # [Left, Right, Jump]
+        self.vel_y = 0
+        self.is_jumping = False
+        self.speed = 7
+
+    def move(self, keys, platforms):
+        dx = 0
+        dy = 0
+
+        # Movement Input
+        if keys[self.controls[0]]: dx -= self.speed
+        if keys[self.controls[1]]: dx += self.speed
+        if keys[self.controls[2]] and not self.is_jumping:
+            self.vel_y = -12
+            self.is_jumping = True
+
+        # Gravity
+        self.vel_y += 0.5
+        dy += self.vel_y
+
+        # Screen horizontal boundaries
+        if self.rect.left + dx < 0: dx = -self.rect.left
+        if self.rect.right + dx > SCREEN_WIDTH: dx = SCREEN_WIDTH - self.rect.right
+
+        # Platform collision
+        for plat in platforms:
+            if plat.colliderect(self.rect.x + dx, self.rect.y + dy, self.rect.width, self.rect.height):
+                if self.vel_y > 0:  # Only collide when falling down
+                    self.rect.bottom = plat.top
+                    self.vel_y = 0
+                    self.is_jumping = False
+                    dy = 0
+
+        self.rect.x += dx
+        self.rect.y += dy
+
+
+def main():
+    pygame.init()
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+    pygame.display.set_caption("Lava Rise: 2-Player Co-op")
+    clock = pygame.time.Clock()
+    font = pygame.font.SysFont("Arial", 28, bold=True)
+
+    # Reset/Initialize Game Variables
+    p1 = Player(250, 700, BLUE, [pygame.K_a, pygame.K_d, pygame.K_w])
+    p2 = Player(320, 700, RED, [pygame.K_LEFT, pygame.K_RIGHT, pygame.K_UP])
+
+    # Create starting floor and random platforms
+    platforms = [pygame.Rect(0, 750, SCREEN_WIDTH, 50)]
+    for i in range(15):
+        platforms.append(pygame.Rect(random.randint(0, 500), 750 - (i * 70), 100, 15))
+
+    lava_y = SCREEN_HEIGHT + 100  # Start lava slightly below the screen
+    lava_speed = 0.7
+    score = 0
+    game_over = False
+    running = True
+
+    # --- Main Game Loop ---
+    while running:
+        screen.fill(BG_COLOR)
+        keys = pygame.key.get_pressed()
+
+        # 1. Event Handling
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+
+            # Restart with 'R' if game is over
+            if event.type == pygame.KEYDOWN and game_over:
+                if event.key == pygame.K_r:
+                    main()  # Recursive call to restart
+                    return  # Exit current loop
+
+        if not game_over:
+            # 2. Update Players
+            p1.move(keys, platforms)
+            p2.move(keys, platforms)
+
+            # 3. Camera/Scrolling Logic
+            highest_y = min(p1.rect.y, p2.rect.y)
+            if highest_y < SCREEN_HEIGHT // 2:
+                offset = (SCREEN_HEIGHT // 2) - highest_y
+                p1.rect.y += offset
+                p2.rect.y += offset
+                lava_y += offset
+                score += offset // 10
+                for plat in platforms:
+                    plat.y += offset
+
+            # 4. Lava Logic
+            lava_y -= lava_speed
+            lava_speed += 0.0005  # Slowly speed up
+
+            # Create a rectangle for the lava to check collision
+            lava_rect = pygame.Rect(0, lava_y, SCREEN_WIDTH, SCREEN_HEIGHT * 2)
+
+            # 5. Check Death
+            if p1.rect.colliderect(lava_rect) or p2.rect.colliderect(lava_rect):
+                game_over = True
+
+        # --- 6. Drawing ---
+
+        # Draw Platforms & Recycle them
+        for plat in platforms:
+            if plat.y > SCREEN_HEIGHT:
+                plat.y = min(p.y for p in platforms) - 70
+                plat.x = random.randint(0, 500)
+            pygame.draw.rect(screen, PLATFORM, plat)
+
+        # Draw Players
+        pygame.draw.rect(screen, p1.color, p1.rect)
+        pygame.draw.rect(screen, p2.color, p2.rect)
+
+        # Draw Lava
+        pygame.draw.rect(screen, LAVA, (0, lava_y, SCREEN_WIDTH, SCREEN_HEIGHT * 2))
+
+        # Score UI
+        score_text = font.render(f"SCORE: {int(score)}", True, WHITE)
+        screen.blit(score_text, (20, 20))
+
+        # Game Over Text
+        if game_over:
+            overlay = font.render("GAME OVER! PRESS 'R' TO RESTART", True, WHITE)
+            text_rect = overlay.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2))
+            # Draw a dark background box for the text
+            pygame.draw.rect(screen, (0, 0, 0), text_rect.inflate(20, 20))
+            screen.blit(overlay, text_rect)
+
+        pygame.display.flip()
+        clock.tick(FPS)
+
+    pygame.quit()
+
+
+if __name__ == "__main__":
+    main()
