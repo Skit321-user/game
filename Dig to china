@@ -1,0 +1,291 @@
+import pygame
+import random
+import os
+import wave
+import math
+import struct
+
+
+# --- 0. AUTOMATIC SOUND GENERATOR ---
+def generate_sfx_if_missing():
+    def create_wav(filename, duration, func):
+        if os.path.exists(filename): return
+        sample_rate = 44100
+        n_frames = int(duration * sample_rate)
+        with wave.open(filename, 'w') as f:
+            f.setnchannels(1);
+            f.setsampwidth(2);
+            f.setframerate(sample_rate)
+            for i in range(n_frames):
+                t = i / sample_rate
+                val = max(-1.0, min(1.0, func(t, i, n_frames)))
+                f.writeframes(struct.pack('<h', int(val * 32767.0)))
+
+    def crunch_wave(t, i, total):
+        return random.uniform(-1, 1) * max(0, 1.0 - (t * 6)) * 0.8
+
+    def cash_wave(t, i, total):
+        freq = 1200 + (t * 4000)
+        vol = 1.0 - (i / total)
+        w = math.sin(2 * math.pi * freq * t)
+        if t > 0.1: w += 0.5 * math.sin(2 * math.pi * (freq * 1.5) * t)
+        return w * vol * 0.5
+
+    create_wav("crunch.wav", 0.2, crunch_wave)
+    create_wav("cash.wav", 0.3, cash_wave)
+
+
+generate_sfx_if_missing()
+
+# --- 1. SETUP ---
+pygame.init()
+pygame.mixer.init()
+
+try:
+    crunch_sfx = pygame.mixer.Sound("crunch.wav")
+    cash_sfx = pygame.mixer.Sound("cash.wav")
+except:
+    crunch_sfx, cash_sfx = None, None
+
+WIDTH, HEIGHT = 600, 600
+screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.SCALED)
+pygame.display.set_caption("Dig to China: Physics Fixed")
+clock = pygame.time.Clock()
+font = pygame.font.SysFont("Arial", 18, bold=True)
+big_font = pygame.font.SysFont("Arial", 40, bold=True)
+
+# Colors
+WHITE, BLACK, GOLD, RED = (255, 255, 255), (0, 0, 0), (255, 215, 0), (255, 50, 50)
+SKY_BLUE, PLAYER_COLOR, PROGRESS_GREEN = (135, 206, 235), (0, 255, 0), (50, 255, 50)
+ORANGE, TNT_RED = (255, 165, 0), (255, 50, 50)
+TILE_SIZE = 40
+COLS, ROWS = WIDTH // TILE_SIZE, 1000
+CHINA_DEPTH = ROWS - 5
+
+
+def generate_world():
+    return [[1 if y < 6 else (2 if random.random() < 0.03 else (1 if random.random() < 0.1 else 0))
+             for x in range(COLS)] for y in range(ROWS)]
+
+
+def get_layer_stats(depth):
+    if depth < 300:
+        return (101, 67, 33), 1.0, 1.0
+    elif depth < 700:
+        return (180, 60, 20), 2.5, 2.0
+    else:
+        return (30, 10, 5), 5.5, 4.5
+
+
+# --- 2. GLOBAL VARIABLES ---
+rebirth_count = 0
+world = generate_world()
+px, py = WIDTH // 2, TILE_SIZE * 2
+p_w, p_h = 30, 30
+coins, tnt_count = 0, 0
+fuel, max_fuel = 100.0, 100.0
+pickaxe_level, fuel_tank_level, cooling_level = 1, 1, 1
+mining_power = 6.0
+drill_heat, max_heat, heat_cooldown_timer = 0.0, 100.0, 0
+in_shop, is_fullscreen = False, False
+explosions, mining_progress, current_mining_block = [], 0, None
+floating_texts = []
+
+
+def add_notify(x, y, text, color):
+    floating_texts.append({'x': x, 'y': y, 'text': text, 'color': color, 'life': 60})
+
+
+# --- 3. MAIN LOOP ---
+running, game_won = True, False
+while running:
+    if not game_won:
+        screen.fill(SKY_BLUE)
+
+        drill_cost = int(150 * (1.4 ** (pickaxe_level - 1)))
+        tank_cost = int(300 * (1.3 ** (fuel_tank_level - 1)))
+        cooling_cost = int(200 * (1.5 ** (cooling_level - 1)))
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT: running = False
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_f:
+                    is_fullscreen = not is_fullscreen
+                    if is_fullscreen:
+                        screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN | pygame.SCALED)
+                    else:
+                        screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.SCALED)
+
+                if event.key == pygame.K_u:
+                    in_shop = not in_shop
+                    mining_progress = 0  # Reset mining on shop open
+
+                if event.key == pygame.K_t and tnt_count > 0 and not in_shop:
+                    tnt_count -= 1;
+                    explosions.append([px, py, 60])
+
+                if in_shop:
+                    if event.key == pygame.K_1 and coins >= drill_cost:
+                        coins -= drill_cost;
+                        pickaxe_level += 1;
+                        mining_power += 4.5
+                        add_notify(WIDTH // 2, 300, f"-${drill_cost}", RED)
+                        if cash_sfx: cash_sfx.play()
+                    if event.key == pygame.K_2 and coins >= 40:
+                        coins -= 40;
+                        fuel = max_fuel
+                        add_notify(WIDTH // 2, 330, "-$40", RED)
+                        if cash_sfx: cash_sfx.play()
+                    if event.key == pygame.K_3 and coins >= 100:
+                        coins -= 100;
+                        tnt_count += 1
+                        add_notify(WIDTH // 2, 360, "-$100", RED)
+                        if cash_sfx: cash_sfx.play()
+                    if event.key == pygame.K_4 and coins >= tank_cost:
+                        coins -= tank_cost;
+                        fuel_tank_level += 1
+                        max_fuel = int(max_fuel * 1.25);
+                        fuel = max_fuel
+                        add_notify(WIDTH // 2, 390, f"-${tank_cost}", RED)
+                        if cash_sfx: cash_sfx.play()
+                    if event.key == pygame.K_5 and coins >= cooling_cost:
+                        coins -= cooling_cost;
+                        cooling_level += 1
+                        add_notify(WIDTH // 2, 420, f"-${cooling_cost}", RED)
+                        if cash_sfx: cash_sfx.play()
+
+        # Heat Management (Always active)
+        if heat_cooldown_timer > 0:
+            heat_cooldown_timer -= 1
+            drill_heat = max(0, drill_heat - 0.7)
+        else:
+            drill_heat = max(0, drill_heat - (0.3 * cooling_level))
+
+        # --- PHYSICS ENGINE ---
+        dx, dy = 0, 0
+        gravity = 3
+        keys = pygame.key.get_pressed()
+
+        if not in_shop:
+            # Allow controls ONLY if fuel > 0 AND not overheated
+            if fuel > 0 and heat_cooldown_timer == 0:
+                if keys[pygame.K_LEFT]: dx = -5
+                if keys[pygame.K_RIGHT]: dx = 5
+                if keys[pygame.K_DOWN]: dy = 5
+
+            depth_m = int(py // TILE_SIZE)
+            _, hardness, drain_mult = get_layer_stats(depth_m)
+
+            # X Collision & Mining
+            new_px = px + dx
+            tx = int((new_px + (p_w / 2 if dx > 0 else 0)) // TILE_SIZE)
+            ty = int((py + p_h / 2) // TILE_SIZE)
+
+            if 0 <= tx < COLS:
+                if world[ty][tx] == 0:  # Hit Wall
+                    if dx != 0 and fuel > 0 and heat_cooldown_timer == 0:
+                        if current_mining_block != (tx, ty): current_mining_block, mining_progress = (tx, ty), 0
+                        mining_progress += (mining_power / (hardness * (1 + rebirth_count * 0.5)))
+                        fuel = max(0, fuel - (0.05 * drain_mult))
+                        drill_heat += 0.8
+                else:  # Air
+                    px = max(0, min(WIDTH - p_w, new_px))
+                    if world[ty][tx] == 2:
+                        val = random.randint(20, 150);
+                        coins += val
+                        add_notify(px, py - 40, f"+${val}", GOLD);
+                        world[ty][tx] = 1
+
+            # Y Collision & Gravity (Gravity works even at 0 fuel)
+            new_py = py + dy + gravity
+            ty_foot = int((new_py + p_h) // TILE_SIZE)
+            tx_foot = int((px + p_w / 2) // TILE_SIZE)
+
+            if 0 <= ty_foot < ROWS:
+                if world[ty_foot][tx_foot] == 0:  # Hit Ground
+                    if dy > 0 and fuel > 0 and heat_cooldown_timer == 0:
+                        if current_mining_block != (tx_foot, ty_foot): current_mining_block, mining_progress = (tx_foot,
+                                                                                                                ty_foot), 0
+                        mining_progress += (mining_power / (hardness * (1 + rebirth_count * 0.5)))
+                        fuel = max(0, fuel - (0.05 * drain_mult))
+                        drill_heat += 0.8
+                else:  # Fall
+                    py = new_py
+                    if world[ty_foot][tx_foot] == 2:
+                        val = random.randint(20, 150);
+                        coins += val
+                        add_notify(px, py - 40, f"+${val}", GOLD);
+                        world[ty_foot][tx_foot] = 1
+
+            if drill_heat >= max_heat and heat_cooldown_timer == 0:
+                heat_cooldown_timer = 150;
+                mining_progress = 0;
+                current_mining_block = None
+
+            if mining_progress >= 100 and current_mining_block:
+                world[current_mining_block[1]][current_mining_block[0]] = 1
+                mining_progress = 0;
+                current_mining_block = None
+                if crunch_sfx: crunch_sfx.play()
+
+        # Render
+        cam_y = max(0, py - HEIGHT // 2)
+        for y in range(max(0, int(cam_y // TILE_SIZE)), min(ROWS, int((cam_y + HEIGHT) // TILE_SIZE) + 1)):
+            base_color, _, _ = get_layer_stats(y)
+            for x in range(COLS):
+                rect = pygame.Rect(x * TILE_SIZE, y * TILE_SIZE - cam_y, TILE_SIZE, TILE_SIZE)
+                if world[y][x] == 0:
+                    pygame.draw.rect(screen, base_color, rect);
+                    pygame.draw.rect(screen, BLACK, rect, 1)
+                elif world[y][x] == 1:
+                    pygame.draw.rect(screen, (20, 10, 5), rect)
+                elif world[y][x] == 2:
+                    pygame.draw.rect(screen, (20, 10, 5), rect);
+                    pygame.draw.circle(screen, GOLD, rect.center, 10)
+
+        # Player
+        draw_px, draw_py = px, py - cam_y
+        if heat_cooldown_timer > 0: draw_px += random.randint(-2, 2)
+        pygame.draw.rect(screen, PLAYER_COLOR, (draw_px, draw_py, p_w, p_h))
+
+        # Floating Text
+        for ft in floating_texts[:]:
+            text_surf = font.render(ft['text'], True, ft['color'])
+            ft['y'] -= 1;
+            ft['life'] -= 1
+            if ft['life'] > 0:
+                screen.blit(text_surf, (ft['x'], ft['y'] - cam_y if ft['y'] > 1000 else ft['y']))
+            else:
+                floating_texts.remove(ft)
+
+        # UI & Warnings
+        pygame.draw.rect(screen, BLACK, (0, 540, WIDTH, 60))
+        ui = f"${coins} | FUEL: {int(fuel)}% | TNT: {tnt_count} | DEPTH: {int(py // TILE_SIZE)}m"
+        screen.blit(font.render(ui, True, WHITE), (15, 555))
+        pygame.draw.rect(screen, (RED if heat_cooldown_timer > 0 else ORANGE),
+                         (px - 5, py - cam_y - 15, (drill_heat / max_heat) * 40, 8))
+
+        if fuel <= 0:
+            screen.blit(font.render("OUT OF FUEL! PRESS 'U' TO SHOP", True, RED), (WIDTH // 2 - 120, 520))
+
+        if in_shop:
+            overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA);
+            overlay.fill((0, 0, 0, 210))
+            screen.blit(overlay, (0, 0));
+            pygame.draw.rect(screen, (40, 40, 40), (80, 50, 440, 460))
+            screen.blit(big_font.render("SHOP (U: Exit)", True, GOLD), (180, 70))
+            items = [f"1. Drill: ${drill_cost}", "2. Refill Fuel: $40", "3. Buy TNT: $100", f"4. Tank: ${tank_cost}",
+                     f"5. Coolant: ${cooling_cost}"]
+            for i, text in enumerate(items):
+                screen.blit(font.render(text, True, WHITE), (100, 150 + (i * 50)))
+
+        if py // TILE_SIZE >= CHINA_DEPTH: game_won = True
+    else:
+        screen.fill((200, 0, 0));
+        screen.blit(big_font.render("YOU REACHED CHINA!", True, GOLD), (100, 200))
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT: running = False
+
+    pygame.display.flip();
+    clock.tick(60)
+pygame.quit()
